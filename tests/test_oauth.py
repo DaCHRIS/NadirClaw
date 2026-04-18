@@ -8,6 +8,8 @@ import pytest
 from nadirclaw.oauth import (
     _generate_code_challenge,
     _generate_code_verifier,
+    _parse_openai_redirect_url,
+    login_openai,
     validate_anthropic_setup_token,
 )
 
@@ -91,3 +93,93 @@ class TestGeminiClientConfig:
 
         config = _resolve_gemini_client_config()
         assert config == {}
+
+
+class TestOpenAIHeadlessOAuth:
+    def test_parse_redirect_success(self):
+        code = _parse_openai_redirect_url(
+            "http://localhost:1455/auth/callback?code=abc123&state=st",
+            expected_state="st",
+            expected_redirect_uri="http://localhost:1455/auth/callback",
+        )
+        assert code == "abc123"
+
+    @pytest.mark.parametrize(
+        "url, expected_error",
+        [
+            ("", "No redirect URL provided"),
+            ("not-a-url", "Invalid redirect URL format"),
+            ("http://localhost:1455/wrong?code=a&state=st", "path does not match"),
+            ("http://localhost:1455/auth/callback?state=st", "No authorization code"),
+            ("http://localhost:1455/auth/callback?error=access_denied&state=st", "Authorization failed"),
+            ("http://localhost:1455/auth/callback?code=a&state=wrong", "State mismatch"),
+        ],
+    )
+    def test_parse_redirect_errors(self, url, expected_error):
+        with pytest.raises(RuntimeError, match=expected_error):
+            _parse_openai_redirect_url(
+                url,
+                expected_state="st",
+                expected_redirect_uri="http://localhost:1455/auth/callback",
+            )
+
+    def test_headless_login_exchanges_token(self, monkeypatch):
+        monkeypatch.setattr("nadirclaw.oauth.secrets.token_urlsafe", lambda n=32: "fixed-state")
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "http://localhost:1455/auth/callback?code=abc&state=fixed-state")
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"access_token":"tok","refresh_token":"ref","expires_in":111}'
+
+        captured = {}
+
+        def _fake_urlopen(req, timeout=30):
+            captured["data"] = req.data.decode("utf-8")
+            return _Resp()
+
+        monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+        out = login_openai(timeout=1, auth_mode="headless")
+        assert out["access_token"] == "tok"
+        assert "redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" in captured["data"]
+
+    def test_headless_login_invalid_mode(self):
+        with pytest.raises(RuntimeError, match="Unsupported auth_mode"):
+            login_openai(auth_mode="invalid-mode")
+
+    def test_browser_mode_uses_localhost_redirect(self, monkeypatch):
+        monkeypatch.setattr("nadirclaw.oauth.secrets.token_urlsafe", lambda n=32: "browser-state")
+
+        opened = {}
+        monkeypatch.setattr("nadirclaw.oauth.webbrowser.open", lambda url: opened.setdefault("url", url))
+
+        class _Queue:
+            def get(self, timeout=None):
+                return {"code": "abc", "state": "browser-state"}
+
+        class _Server:
+            def shutdown(self):
+                opened["shutdown"] = True
+
+        monkeypatch.setattr("nadirclaw.oauth._start_callback_server", lambda timeout, bind_host="localhost": (_Server(), _Queue()))
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"access_token":"tok","refresh_token":"ref","expires_in":3600}'
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=30: _Resp())
+        out = login_openai(timeout=1, auth_mode="browser")
+        assert out["access_token"] == "tok"
+        assert "redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" in opened["url"]
+        assert opened["shutdown"] is True
