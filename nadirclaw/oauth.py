@@ -241,6 +241,8 @@ def _parse_openai_redirect_url(
         raise RuntimeError("Invalid redirect URL format.")
 
     expected = urllib.parse.urlparse(expected_redirect_uri)
+    if parsed.scheme.lower() != (expected.scheme or "").lower():
+        raise RuntimeError("Redirect URL scheme does not match expected OAuth callback scheme.")
     if (parsed.hostname or "").lower() != (expected.hostname or "").lower():
         raise RuntimeError("Redirect URL host does not match expected OAuth callback host.")
     if parsed.path != expected.path:

@@ -109,6 +109,7 @@ class TestOpenAIHeadlessOAuth:
         [
             ("", "No redirect URL provided"),
             ("not-a-url", "Invalid redirect URL format"),
+            ("https://localhost:1455/auth/callback?code=a&state=st", "scheme does not match"),
             ("http://localhost:1455/wrong?code=a&state=st", "path does not match"),
             ("http://localhost:1455/auth/callback?state=st", "No authorization code"),
             ("http://localhost:1455/auth/callback?error=access_denied&state=st", "Authorization failed"),

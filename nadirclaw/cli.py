@@ -573,7 +573,8 @@ def auth_openai():
 def openai_login(timeout, headless):
     """Login via OAuth — use your ChatGPT subscription, no API key needed.
 
-    Opens a browser for OAuth authorization. No external CLIs required.
+    Browser mode opens a local callback flow.
+    With --headless, uses manual redirect-URL completion (copy/paste).
     """
     import time as _time
     from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
@@ -597,7 +598,10 @@ def openai_login(timeout, headless):
             return
 
     click.echo("Logging in to OpenAI...")
-    click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
+    if headless:
+        click.echo("Headless mode: complete login in a browser and paste the final redirect URL here.\n")
+    else:
+        click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
 
     try:
         token_data = login_openai(timeout=timeout, auth_mode="headless" if headless else "browser")
