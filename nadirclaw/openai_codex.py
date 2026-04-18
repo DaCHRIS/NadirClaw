@@ -121,7 +121,12 @@ class OpenAICodexRuntime:
         models = payload.get("models") or []
         if isinstance(models, list):
             self._models = [m for m in models if isinstance(m, str) and m.strip()]
-        self._fetched_at = int(payload.get("fetched_at", 0) or 0)
+        fetched_raw = payload.get("fetched_at", 0)
+        try:
+            self._fetched_at = int(fetched_raw or 0)
+        except (TypeError, ValueError):
+            logger.warning("Invalid OpenAI Codex cache fetched_at value: %r", fetched_raw)
+            self._fetched_at = 0
 
     def _write_cache(self, models: List[str], raw_response: Dict[str, Any]) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)

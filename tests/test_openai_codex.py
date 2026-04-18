@@ -128,6 +128,17 @@ def test_corrupt_cache_file_is_ignored(tmp_path, monkeypatch):
     assert runtime.get_discovered_display_models() == []
 
 
+def test_invalid_fetched_at_in_cache_is_ignored(tmp_path, monkeypatch):
+    cache_file = tmp_path / "openai_codex_models.json"
+    cache_file.write_text(json.dumps({"models": ["gpt-5.4"], "fetched_at": "not-an-int"}))
+    monkeypatch.setenv("NADIRCLAW_OPENAI_CODEX_MODEL_CACHE", str(cache_file))
+
+    runtime = OpenAICodexRuntime()
+    models = runtime.get_discovered_display_models()
+    assert models == ["openai-codex/gpt-5.4"]
+    assert runtime._fetched_at == 0
+
+
 def test_cache_raw_payload_is_optional(tmp_path, monkeypatch):
     cache_file = tmp_path / "openai_codex_models.json"
     monkeypatch.setenv("NADIRCLAW_OPENAI_CODEX_MODEL_CACHE", str(cache_file))
