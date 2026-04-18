@@ -963,3 +963,26 @@ class TestCodexTransportDecisionsMore:
             out = asyncio.run(_collect())
         assert out[0][0]["content"] == "hi"
         assert out[-1][2] == "stop"
+
+    @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
+    @patch("nadirclaw.credentials.get_credential", return_value="tok")
+    @patch("nadirclaw.server.get_openai_codex_runtime")
+    def test_streaming_empty_stream_raises_upstream_error(self, mock_runtime_factory, *_):
+        from nadirclaw.server import ChatCompletionRequest, UpstreamModelError, _stream_openai_codex
+
+        runtime = mock_runtime_factory.return_value
+        runtime.responses_url = "https://resp"
+        runtime.chat_completions_url = "https://chat"
+        runtime.refresh_if_stale = AsyncMock(return_value=[])
+        runtime.resolve_runtime_model.return_value = ("gpt-5.4", "configured")
+        fake_client = _FakeHttpxClient(streams=[_FakeHttpxStreamResponse(status_code=200, lines=[])])
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            req = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+
+            async def _consume():
+                async for _ in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
+                    pass
+
+            with pytest.raises(UpstreamModelError):
+                asyncio.run(_consume())
+

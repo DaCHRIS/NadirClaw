@@ -978,11 +978,14 @@ async def _call_litellm(
     try:
         response = await litellm.acompletion(**call_kwargs)
     except Exception as e:
-        # Catch rate limit errors from any provider through LiteLLM
-        err_str = str(e).lower()
-        if "429" in err_str or "rate" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
-            logger.warning("LiteLLM 429 rate limit for model=%s: %s", litellm_model, e)
-            raise RateLimitExhausted(model=model, retry_after=60)
+        normalized = _normalize_provider_exception(
+            e,
+            model=model,
+            provider=provider,
+            context="litellm_call",
+        )
+        if normalized is not e:
+            raise normalized from e
         raise
 
     msg = response.choices[0].message
@@ -2106,44 +2109,60 @@ async def _stream_litellm(
     try:
         response = await litellm.acompletion(**call_kwargs)
     except Exception as e:
-        err_str = str(e).lower()
-        if "429" in err_str or "rate" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
-            raise RateLimitExhausted(model=model, retry_after=60)
+        normalized = _normalize_provider_exception(
+            e,
+            model=model,
+            provider=provider,
+            context="litellm_stream_connect",
+        )
+        if normalized is not e:
+            raise normalized from e
         raise
 
-    async for chunk in response:
-        usage = None
-        if hasattr(chunk, "usage") and chunk.usage:
-            usage = {
-                "prompt_tokens": chunk.usage.prompt_tokens or 0,
-                "completion_tokens": chunk.usage.completion_tokens or 0,
-            }
+    try:
+        async for chunk in response:
+            usage = None
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                    "completion_tokens": chunk.usage.completion_tokens or 0,
+                }
 
-        choice = chunk.choices[0] if chunk.choices else None
-        if choice is None:
-            # Usage-only final chunk (no choices) -- yield usage without content
-            if usage:
-                yield {}, usage, None
-            continue
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                # Usage-only final chunk (no choices) -- yield usage without content
+                if usage:
+                    yield {}, usage, None
+                continue
 
-        delta = choice.delta
-        delta_dict: dict[str, Any] = {}
-        if hasattr(delta, "role") and delta.role:
-            delta_dict["role"] = delta.role
-        if hasattr(delta, "content") and delta.content is not None:
-            delta_dict["content"] = delta.content
-        if hasattr(delta, "tool_calls") and delta.tool_calls:
-            delta_dict["tool_calls"] = [
-                tc.model_dump() if hasattr(tc, "model_dump") else tc
-                for tc in delta.tool_calls
-            ]
-        # Preserve reasoning/thinking content in streaming deltas
-        if hasattr(delta, "reasoning_content") and delta.reasoning_content is not None:
-            delta_dict["reasoning_content"] = delta.reasoning_content
-        if hasattr(delta, "thinking") and delta.thinking is not None:
-            delta_dict["thinking"] = delta.thinking
+            delta = choice.delta
+            delta_dict: dict[str, Any] = {}
+            if hasattr(delta, "role") and delta.role:
+                delta_dict["role"] = delta.role
+            if hasattr(delta, "content") and delta.content is not None:
+                delta_dict["content"] = delta.content
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                delta_dict["tool_calls"] = [
+                    tc.model_dump() if hasattr(tc, "model_dump") else tc
+                    for tc in delta.tool_calls
+                ]
+            # Preserve reasoning/thinking content in streaming deltas
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content is not None:
+                delta_dict["reasoning_content"] = delta.reasoning_content
+            if hasattr(delta, "thinking") and delta.thinking is not None:
+                delta_dict["thinking"] = delta.thinking
 
-        yield delta_dict, usage, choice.finish_reason
+            yield delta_dict, usage, choice.finish_reason
+    except Exception as e:
+        normalized = _normalize_provider_exception(
+            e,
+            model=model,
+            provider=provider,
+            context="litellm_stream_iterate",
+        )
+        if normalized is not e:
+            raise normalized from e
+        raise
 
 
 async def _stream_openai_codex(
