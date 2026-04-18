@@ -117,6 +117,12 @@ class OpenAICodexRuntime:
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Could not read OpenAI Codex model cache: %s", exc)
             return
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Ignoring OpenAI Codex model cache with non-object root type: %s",
+                type(payload).__name__,
+            )
+            return
 
         models = payload.get("models") or []
         if isinstance(models, list):

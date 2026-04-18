@@ -569,10 +569,12 @@ def auth_openai():
 
 @auth_openai.command(name="login")
 @click.option("--timeout", "-t", default=300, help="Login timeout in seconds (default: 300)")
-def openai_login(timeout):
+@click.option("--headless", is_flag=True, help="Use manual copy/paste OAuth flow (no local callback server).")
+def openai_login(timeout, headless):
     """Login via OAuth — use your ChatGPT subscription, no API key needed.
 
-    Opens a browser for OAuth authorization. No external CLIs required.
+    Browser mode opens a local callback flow.
+    With --headless, uses manual redirect-URL completion (copy/paste).
     """
     import time as _time
     from nadirclaw.credentials import get_credential, get_credential_source, _read_credentials
@@ -596,10 +598,13 @@ def openai_login(timeout):
             return
 
     click.echo("Logging in to OpenAI...")
-    click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
+    if headless:
+        click.echo("Headless mode: complete login in a browser and paste the final redirect URL here.\n")
+    else:
+        click.echo("A browser window will open for you to sign in with your OpenAI account.\n")
 
     try:
-        token_data = login_openai(timeout=timeout)
+        token_data = login_openai(timeout=timeout, auth_mode="headless" if headless else "browser")
     except RuntimeError as e:
         click.echo(f"\nLogin failed: {e}")
         raise SystemExit(1)

@@ -39,6 +39,7 @@ _OPENAI_AUTHORIZE_URL = f"{_OPENAI_AUTH_BASE}/oauth/authorize"
 _OPENAI_TOKEN_URL = f"{_OPENAI_AUTH_BASE}/oauth/token"
 _OPENAI_AUDIENCE = "https://api.openai.com/v1"
 _OPENAI_SCOPES = "openid profile email offline_access"
+_OPENAI_REDIRECT_HOST = "localhost"
 
 # Anthropic OAuth (PKCE) - using public client
 _ANTHROPIC_CLIENT_ID = "claude-cli"  # Public client ID
@@ -187,6 +188,7 @@ def _start_callback_server(
     timeout: int = 300,
     port: int = _CALLBACK_PORT,
     callback_path: str = _CALLBACK_PATH,
+    bind_host: str = "localhost",
 ):
     """Start local HTTP server to receive OAuth callback.
 
@@ -195,13 +197,13 @@ def _start_callback_server(
     import queue
 
     callback_queue = queue.Queue()
-    redirect_uri = f"http://localhost:{port}{callback_path}"
+    redirect_uri = f"http://{bind_host}:{port}{callback_path}"
 
     def handler_factory(*args, **kwargs):
         return OAuthCallbackHandler(callback_queue, callback_path, *args, **kwargs)
 
     try:
-        server = HTTPServer(("localhost", port), handler_factory)
+        server = HTTPServer((bind_host, port), handler_factory)
     except OSError as e:
         if e.errno in (48, 98):  # EADDRINUSE on macOS / Linux
             raise RuntimeError(
@@ -224,7 +226,46 @@ def _start_callback_server(
 # OpenAI OAuth
 # ---------------------------------------------------------------------------
 
-def login_openai(timeout: int = 300) -> Optional[dict]:
+def _parse_openai_redirect_url(
+    redirect_url: str,
+    *,
+    expected_state: str,
+    expected_redirect_uri: str,
+) -> str:
+    """Validate and parse a manually pasted OpenAI OAuth redirect URL."""
+    if not redirect_url or not redirect_url.strip():
+        raise RuntimeError("No redirect URL provided.")
+
+    parsed = urllib.parse.urlparse(redirect_url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError("Invalid redirect URL format.")
+
+    expected = urllib.parse.urlparse(expected_redirect_uri)
+    if parsed.scheme.lower() != (expected.scheme or "").lower():
+        raise RuntimeError("Redirect URL scheme does not match expected OAuth callback scheme.")
+    if (parsed.hostname or "").lower() != (expected.hostname or "").lower():
+        raise RuntimeError("Redirect URL host does not match expected OAuth callback host.")
+    if parsed.path != expected.path:
+        raise RuntimeError("Redirect URL path does not match expected OAuth callback path.")
+    if parsed.port != expected.port:
+        raise RuntimeError("Redirect URL port does not match expected OAuth callback port.")
+
+    params = urllib.parse.parse_qs(parsed.query)
+    error = params.get("error", [None])[0]
+    if error:
+        raise RuntimeError(f"Authorization failed: {error}")
+
+    state = params.get("state", [None])[0]
+    if state != expected_state:
+        raise RuntimeError("State mismatch — possible CSRF attack")
+
+    auth_code = params.get("code", [None])[0]
+    if not auth_code:
+        raise RuntimeError("No authorization code in redirect URL.")
+    return auth_code
+
+
+def login_openai(timeout: int = 300, auth_mode: str = "browser") -> Optional[dict]:
     """Run standalone OpenAI OAuth PKCE flow.
 
     Returns dict with: access_token, refresh_token, expires_at — or None.
@@ -234,7 +275,10 @@ def login_openai(timeout: int = 300) -> Optional[dict]:
     code_challenge = _generate_code_challenge(code_verifier)
     state = secrets.token_urlsafe(32)
 
-    redirect_uri = f"http://127.0.0.1:{_CALLBACK_PORT}{_CALLBACK_PATH}"
+    if auth_mode not in ("browser", "headless"):
+        raise RuntimeError(f"Unsupported auth_mode={auth_mode!r}. Expected 'browser' or 'headless'.")
+
+    redirect_uri = f"http://{_OPENAI_REDIRECT_HOST}:{_CALLBACK_PORT}{_CALLBACK_PATH}"
 
     # Build authorization URL
     auth_params = {
@@ -252,32 +296,50 @@ def login_openai(timeout: int = 300) -> Optional[dict]:
     logger.info("Starting OpenAI OAuth flow...")
     logger.debug("Authorization URL: %s", auth_url)
 
-    # Start callback server
-    server, callback_queue = _start_callback_server(timeout)
+    server = None
 
     try:
-        # Open browser
-        print(f"\nOpening browser for OpenAI authorization...")
-        print(f"If the browser doesn't open, visit:\n  {auth_url}\n")
-        webbrowser.open(auth_url)
+        if auth_mode == "browser":
+            # Start callback server
+            server, callback_queue = _start_callback_server(
+                timeout,
+                bind_host=_OPENAI_REDIRECT_HOST,
+            )
 
-        # Wait for callback
-        print("Waiting for authorization...")
-        try:
-            result = callback_queue.get(timeout=timeout)
-        except Exception:
-            raise RuntimeError(f"Authorization timed out after {timeout}s")
+            # Open browser
+            print(f"\nOpening browser for OpenAI authorization...")
+            print(f"If the browser doesn't open, visit:\n  {auth_url}\n")
+            webbrowser.open(auth_url)
 
-        if "error" in result:
-            raise RuntimeError(f"Authorization failed: {result['error']}")
+            # Wait for callback
+            print("Waiting for authorization...")
+            try:
+                result = callback_queue.get(timeout=timeout)
+            except Exception:
+                raise RuntimeError(f"Authorization timed out after {timeout}s")
 
-        auth_code = result.get("code")
-        if not auth_code:
-            raise RuntimeError("No authorization code received")
+            if "error" in result:
+                raise RuntimeError(f"Authorization failed: {result['error']}")
 
-        # Verify state
-        if result.get("state") != state:
-            raise RuntimeError("State mismatch — possible CSRF attack")
+            auth_code = result.get("code")
+            if not auth_code:
+                raise RuntimeError("No authorization code received")
+
+            # Verify state
+            if result.get("state") != state:
+                raise RuntimeError("State mismatch — possible CSRF attack")
+        else:
+            print("\nHeadless OpenAI OAuth login")
+            print("1) Open this URL in any browser and complete login:")
+            print(f"   {auth_url}")
+            print("2) After login, copy the full redirect URL from the browser address bar.")
+            print("3) Paste it below.")
+            pasted_redirect = input("Redirect URL: ").strip()
+            auth_code = _parse_openai_redirect_url(
+                pasted_redirect,
+                expected_state=state,
+                expected_redirect_uri=redirect_uri,
+            )
 
         # Exchange code for tokens
         token_data = {
@@ -316,7 +378,8 @@ def login_openai(timeout: int = 300) -> Optional[dict]:
         }
 
     finally:
-        server.shutdown()
+        if server is not None:
+            server.shutdown()
 
 
 def refresh_openai_token(refresh_token: str, *, client_id: str = "") -> dict:
@@ -1034,4 +1097,3 @@ def login_gemini(timeout: int = 300) -> Optional[dict]:
 
     finally:
         server.shutdown()
-

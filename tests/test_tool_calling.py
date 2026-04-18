@@ -241,6 +241,25 @@ class TestCallLitellmMessages:
         assert tool_msg["content"] == "72F sunny"
 
     @pytest.mark.asyncio
+    async def test_function_call_and_response_fields_preserved(self):
+        """Legacy function_call/function_response fields should be forwarded unchanged."""
+        request = _make_request(
+            [
+                {"role": "assistant", "content": None, "function_call": {"name": "lookup", "arguments": "{}"}},
+                {"role": "tool", "content": "ok", "function_response": {"name": "lookup", "response": "ok"}},
+            ]
+        )
+
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_comp:
+            mock_comp.return_value = self._mock_response("done")
+            await _call_litellm(TEST_MODEL, request, OLLAMA_PROVIDER)
+
+        call_kwargs = mock_comp.call_args[1]
+        messages = call_kwargs["messages"]
+        assert messages[0]["function_call"] == {"name": "lookup", "arguments": "{}"}
+        assert messages[1]["function_response"] == {"name": "lookup", "response": "ok"}
+
+    @pytest.mark.asyncio
     async def test_tool_calls_in_response(self):
         """When LLM returns tool_calls, they should be in the result dict."""
 

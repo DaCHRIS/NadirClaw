@@ -158,6 +158,7 @@ class TestStreamWithFallback:
 
         async def _always_fail(model, request, provider):
             raise RateLimitExhausted(model=model, retry_after=60)
+            yield  # pragma: no cover - keeps this as async generator for mocking
 
         mock_dispatch.side_effect = _always_fail
 
@@ -192,6 +193,7 @@ class TestStreamWithFallback:
 
         async def _fail(model, request, provider):
             raise RateLimitExhausted(model=model, retry_after=60)
+            yield  # pragma: no cover - keeps this as async generator for mocking
 
         mock_dispatch.side_effect = _fail
 
