@@ -1227,6 +1227,20 @@ def _is_retryable_upstream_status(status_code: int) -> bool:
     return status_code in (408, 409, 429) or status_code >= 500
 
 
+def _is_codex_stream_payload_retryable_for_endpoint_fallback(exc: UpstreamModelError) -> bool:
+    """Return True when Codex streaming error indicates pre-content payload incompatibility."""
+    if exc.status_code is not None:
+        return False
+    msg = str(exc).lower()
+    retryable_markers = (
+        "invalid json chunk",
+        "unexpected json chunk type",
+        "non-list choices",
+        "without any parseable payload chunks",
+    )
+    return any(marker in msg for marker in retryable_markers)
+
+
 def _parse_codex_json_response(resp: Any, *, model: str, context: str) -> Dict[str, Any]:
     """Parse provider JSON payload and map malformed payloads to upstream errors."""
     try:
@@ -2248,6 +2262,7 @@ async def _stream_openai_codex(
 
     async with httpx.AsyncClient(timeout=120) as client:
         for attempt_idx, (stream_url, stream_body, attempt_label) in enumerate(stream_attempts):
+            seen_payload_chunk = False
             try:
                 async with client.stream(
                     "POST",
@@ -2295,7 +2310,6 @@ async def _stream_openai_codex(
                         runtime_model,
                     )
 
-                    seen_payload_chunk = False
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
                             continue
@@ -2397,9 +2411,28 @@ async def _stream_openai_codex(
                 raise
             except RateLimitExhausted:
                 raise
-            except UpstreamModelError:
+            except UpstreamModelError as exc:
+                if (
+                    attempt_idx == 0
+                    and not use_chat_completions
+                    and not seen_payload_chunk
+                    and _is_codex_stream_payload_retryable_for_endpoint_fallback(exc)
+                ):
+                    logger.info(
+                        "OpenAI Codex stream switching to fallback endpoint=%s reason=pre_content_payload_error (%s)",
+                        runtime.chat_completions_url,
+                        exc,
+                    )
+                    continue
                 raise
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                if attempt_idx == 0 and not use_chat_completions and not seen_payload_chunk:
+                    logger.info(
+                        "OpenAI Codex stream switching to fallback endpoint=%s reason=pre_content_network_error (%s)",
+                        runtime.chat_completions_url,
+                        exc,
+                    )
+                    continue
                 raise UpstreamModelError(
                     model=model,
                     provider="openai-codex",
@@ -2735,6 +2768,62 @@ async def _stream_with_fallback(
             failed_models.append(model)
             last_error = e
             continue
+        except Exception as raw_error:
+            if isinstance(raw_error, TypeError) and "__aiter__" in str(raw_error):
+                normalized = UpstreamModelError(
+                    model=model,
+                    provider=provider or "unknown",
+                    message=f"{provider or 'unknown'} streaming iterator error: {raw_error}",
+                )
+            else:
+                normalized = _normalize_provider_exception(
+                    raw_error,
+                    model=model,
+                    provider=provider,
+                    context="stream_dispatch_or_iterate",
+                )
+            if isinstance(normalized, HTTPException):
+                raise normalized from raw_error
+            if isinstance(normalized, (RateLimitExhausted, UpstreamModelError)):
+                if isinstance(normalized, UpstreamModelError):
+                    logger.warning(
+                        "Streaming upstream error on %s via %s (status=%s): %s",
+                        model,
+                        normalized.provider,
+                        normalized.status_code,
+                        normalized,
+                    )
+                if content_started:
+                    logger.error("Mid-stream failure on %s: %s", model, normalized)
+                    error_chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": "\n\n[⚠️ Stream interrupted — model error mid-response]"},
+                            "finish_reason": None,
+                        }],
+                    }
+                    yield {"data": json.dumps(error_chunk)}
+                    finish_chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                    yield {"data": json.dumps(finish_chunk)}
+                    yield {"data": "[DONE]"}
+                    analysis_info["_stream_model"] = model
+                    analysis_info["_stream_usage"] = accumulated_usage
+                    analysis_info["_stream_error"] = str(raw_error)
+                    return
+                failed_models.append(model)
+                last_error = normalized
+                continue
+            raise raw_error
 
     # All models exhausted
     logger.error("All streaming models exhausted: %s", failed_models)

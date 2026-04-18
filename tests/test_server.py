@@ -752,24 +752,33 @@ class TestCodexTransportDecisionsMore:
     @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
     @patch("nadirclaw.credentials.get_credential", return_value="tok")
     @patch("nadirclaw.server.get_openai_codex_runtime")
-    def test_streaming_invalid_json_chunk_raises_upstream_error(self, mock_runtime_factory, *_):
-        from nadirclaw.server import ChatCompletionRequest, UpstreamModelError, _stream_openai_codex
+    def test_streaming_invalid_json_chunk_falls_back_pre_content(self, mock_runtime_factory, *_):
+        from nadirclaw.server import ChatCompletionRequest, _stream_openai_codex
 
         runtime = mock_runtime_factory.return_value
         runtime.responses_url = "https://resp"
         runtime.chat_completions_url = "https://chat"
         runtime.refresh_if_stale = AsyncMock(return_value=[])
         runtime.resolve_runtime_model.return_value = ("gpt-5.4", "configured")
-        fake_client = _FakeHttpxClient(streams=[_FakeHttpxStreamResponse(status_code=200, lines=["data: {not-json"])])
+        lines = ['data: ' + json.dumps({"choices": [{"delta": {"content": "fallback"}, "finish_reason": None}]})]
+        fake_client = _FakeHttpxClient(
+            streams=[
+                _FakeHttpxStreamResponse(status_code=200, lines=["data: {not-json"]),
+                _FakeHttpxStreamResponse(status_code=200, lines=lines),
+            ]
+        )
         with patch("httpx.AsyncClient", return_value=fake_client):
             req = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
 
-            async def _consume():
-                async for _ in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
-                    pass
+            async def _collect():
+                out = []
+                async for item in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
+                    out.append(item)
+                return out
 
-            with pytest.raises(UpstreamModelError):
-                asyncio.run(_consume())
+            out = asyncio.run(_collect())
+        assert out and out[0][0]["content"] == "fallback"
+        assert [c[1] for c in fake_client.stream_calls] == ["https://resp", "https://chat"]
 
     @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
     @patch("nadirclaw.credentials.get_credential", return_value="tok")
@@ -979,21 +988,76 @@ class TestCodexTransportDecisionsMore:
     @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
     @patch("nadirclaw.credentials.get_credential", return_value="tok")
     @patch("nadirclaw.server.get_openai_codex_runtime")
-    def test_streaming_empty_stream_raises_upstream_error(self, mock_runtime_factory, *_):
-        from nadirclaw.server import ChatCompletionRequest, UpstreamModelError, _stream_openai_codex
+    def test_streaming_empty_stream_falls_back_pre_content(self, mock_runtime_factory, *_):
+        from nadirclaw.server import ChatCompletionRequest, _stream_openai_codex
 
         runtime = mock_runtime_factory.return_value
         runtime.responses_url = "https://resp"
         runtime.chat_completions_url = "https://chat"
         runtime.refresh_if_stale = AsyncMock(return_value=[])
         runtime.resolve_runtime_model.return_value = ("gpt-5.4", "configured")
-        fake_client = _FakeHttpxClient(streams=[_FakeHttpxStreamResponse(status_code=200, lines=[])])
+        lines = ['data: ' + json.dumps({"choices": [{"delta": {"content": "chat-ok"}, "finish_reason": None}]})]
+        fake_client = _FakeHttpxClient(
+            streams=[
+                _FakeHttpxStreamResponse(status_code=200, lines=[]),
+                _FakeHttpxStreamResponse(status_code=200, lines=lines),
+            ]
+        )
         with patch("httpx.AsyncClient", return_value=fake_client):
             req = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
 
-            async def _consume():
-                async for _ in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
-                    pass
+            async def _collect():
+                out = []
+                async for item in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
+                    out.append(item)
+                return out
 
-            with pytest.raises(UpstreamModelError):
-                asyncio.run(_consume())
+            out = asyncio.run(_collect())
+        assert out and out[0][0]["content"] == "chat-ok"
+        assert [c[1] for c in fake_client.stream_calls] == ["https://resp", "https://chat"]
+
+    @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
+    @patch("nadirclaw.credentials.get_credential", return_value="tok")
+    @patch("nadirclaw.server.get_openai_codex_runtime")
+    def test_streaming_pre_content_network_error_falls_back_to_chat(self, mock_runtime_factory, *_):
+        import httpx
+        from nadirclaw.server import ChatCompletionRequest, _stream_openai_codex
+
+        runtime = mock_runtime_factory.return_value
+        runtime.responses_url = "https://resp"
+        runtime.chat_completions_url = "https://chat"
+        runtime.refresh_if_stale = AsyncMock(return_value=[])
+        runtime.resolve_runtime_model.return_value = ("gpt-5.4", "configured")
+
+        class _FailingClient(_FakeHttpxClient):
+            def __init__(self):
+                super().__init__(
+                    streams=[
+                        _FakeHttpxStreamResponse(
+                            status_code=200,
+                            lines=['data: ' + json.dumps({"choices": [{"delta": {"content": "chat-net"}, "finish_reason": None}]})],
+                        )
+                    ]
+                )
+                self._failed_once = False
+
+            def stream(self, method, url, headers=None, json=None):
+                if not self._failed_once:
+                    self._failed_once = True
+                    raise httpx.ReadError("read failed")
+                return super().stream(method, url, headers=headers, json=json)
+
+        fake_client = _FailingClient()
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            req = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+
+            async def _collect():
+                out = []
+                async for item in _stream_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"):
+                    out.append(item)
+                return out
+
+            out = asyncio.run(_collect())
+
+        assert out and out[0][0]["content"] == "chat-net"
+        assert [c[1] for c in fake_client.stream_calls] == ["https://chat"]
