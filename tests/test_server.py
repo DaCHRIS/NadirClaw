@@ -575,8 +575,18 @@ class TestCodexTransportDecisions:
         with patch("httpx.AsyncClient", return_value=fake_client):
             req = ChatCompletionRequest(
                 messages=[
-                    {"role": "assistant", "content": "call", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
-                    {"role": "tool", "content": "result", "tool_call_id": "call_1"},
+                    {
+                        "role": "assistant",
+                        "content": "call",
+                        "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+                        "function_call": {"name": "lookup", "arguments": "{}"},
+                    },
+                    {
+                        "role": "tool",
+                        "content": "result",
+                        "tool_call_id": "call_1",
+                        "function_response": {"name": "lookup", "response": "result"},
+                    },
                     {"role": "user", "content": "continue"},
                 ],
                 tools=[{"type": "function", "function": {"name": "lookup", "description": "d", "parameters": {}}}],
@@ -585,6 +595,9 @@ class TestCodexTransportDecisions:
             out = asyncio.run(_call_openai_codex("openai-codex/gpt-5.4", req, "openai-codex"))
         assert out["content"] == "ok"
         assert fake_client.post_calls[0][0] == "https://chat"
+        sent_payload = fake_client.post_calls[0][1]
+        assert sent_payload["messages"][0]["function_call"]["name"] == "lookup"
+        assert sent_payload["messages"][1]["function_response"]["name"] == "lookup"
 
     @patch("nadirclaw.credentials.get_credential_source", return_value="oauth")
     @patch("nadirclaw.credentials.get_credential", return_value="tok")

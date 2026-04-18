@@ -859,6 +859,10 @@ async def _call_litellm(
             msg["tool_calls"] = extra_fields["tool_calls"]
         if "tool_call_id" in extra_fields:
             msg["tool_call_id"] = extra_fields["tool_call_id"]
+        if "function_call" in extra_fields:
+            msg["function_call"] = extra_fields["function_call"]
+        if "function_response" in extra_fields:
+            msg["function_response"] = extra_fields["function_response"]
         if "name" in extra_fields:
             msg["name"] = extra_fields["name"]
         messages.append(msg)
@@ -1040,6 +1044,10 @@ def _build_openai_style_messages(request: "ChatCompletionRequest") -> List[Dict[
             msg["tool_calls"] = extra_fields["tool_calls"]
         if "tool_call_id" in extra_fields:
             msg["tool_call_id"] = extra_fields["tool_call_id"]
+        if "function_call" in extra_fields:
+            msg["function_call"] = extra_fields["function_call"]
+        if "function_response" in extra_fields:
+            msg["function_response"] = extra_fields["function_response"]
         if "name" in extra_fields:
             msg["name"] = extra_fields["name"]
         messages.append(msg)
@@ -2108,6 +2116,10 @@ async def _stream_litellm(
             msg["tool_calls"] = extra_fields["tool_calls"]
         if "tool_call_id" in extra_fields:
             msg["tool_call_id"] = extra_fields["tool_call_id"]
+        if "function_call" in extra_fields:
+            msg["function_call"] = extra_fields["function_call"]
+        if "function_response" in extra_fields:
+            msg["function_response"] = extra_fields["function_response"]
         if "name" in extra_fields:
             msg["name"] = extra_fields["name"]
         messages.append(msg)
