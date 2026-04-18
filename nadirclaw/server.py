@@ -1248,115 +1248,8 @@ def _parse_codex_json_response(resp: Any, *, model: str, context: str) -> Dict[s
     return payload
 
 
-async def _call_openai_codex(
-    model: str,
-    request: "ChatCompletionRequest",
-    provider: str | None,
-) -> Dict[str, Any]:
-    """Direct OpenAI Codex OAuth transport (no LiteLLM)."""
-    import httpx
-
-    from nadirclaw.credentials import get_credential, get_credential_source
-
-    oauth_token = get_credential("openai-codex")
-    if not oauth_token:
-        raise HTTPException(
-            status_code=500,
-            detail="No OpenAI Codex OAuth/API credential configured.",
-        )
-
-    runtime = get_openai_codex_runtime()
-    await runtime.refresh_if_stale(oauth_token)
-    runtime_model, model_source = runtime.resolve_runtime_model(model)
-    token_source = get_credential_source("openai-codex") or "unknown"
-    use_chat_completions = _request_requires_chat_completions_tool_path(request)
-    path_reason = _codex_chat_path_reason(request)
-
-    provider_messages = _build_openai_style_messages(request)
-    body = _build_codex_responses_body(runtime_model, request, provider_messages)
-
-    if use_chat_completions:
-        logger.info(
-            "OpenAI Codex request forcing chat/completions path reason=%s endpoint=%s requested_model=%s runtime_model=%s token_source=%s model_source=%s",
-            path_reason,
-            runtime.chat_completions_url,
-            model,
-            runtime_model,
-            token_source,
-            model_source,
-        )
-
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            if use_chat_completions:
-                target_url = runtime.chat_completions_url
-                payload = _build_codex_chat_completions_body(runtime_model, request, provider_messages, stream=False)
-                resp = await client.post(
-                    target_url,
-                    headers={
-                        "Authorization": f"Bearer {oauth_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-            else:
-                logger.info(
-                    "OpenAI Codex call endpoint=%s requested_model=%s runtime_model=%s token_source=%s model_source=%s",
-                    runtime.responses_url,
-                    model,
-                    runtime_model,
-                    token_source,
-                    model_source,
-                )
-                resp = await client.post(
-                    runtime.responses_url,
-                    headers={
-                        "Authorization": f"Bearer {oauth_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
-                if resp.status_code in (400, 404, 422):
-                    logger.info("OpenAI Codex responses fallback -> chat/completions endpoint=%s", runtime.chat_completions_url)
-                    fallback_body = _build_codex_chat_completions_body(runtime_model, request, provider_messages, stream=False)
-                    resp = await client.post(
-                        runtime.chat_completions_url,
-                        headers={
-                            "Authorization": f"Bearer {oauth_token}",
-                            "Content-Type": "application/json",
-                        },
-                        json=fallback_body,
-                    )
-    except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-        raise UpstreamModelError(
-            model=model,
-            provider="openai-codex",
-            message=f"OpenAI Codex network/timeout error: {exc}",
-        ) from exc
-
-    if resp.status_code >= 400:
-        err_txt = resp.text[:1000]
-        logger.error("OpenAI Codex error (%s): %s", resp.status_code, err_txt)
-        if resp.status_code == 429:
-            raise RateLimitExhausted(model=model, retry_after=60)
-        if _is_retryable_upstream_status(resp.status_code):
-            raise UpstreamModelError(
-                model=model,
-                provider="openai-codex",
-                status_code=resp.status_code,
-                message=f"OpenAI Codex retryable upstream status ({resp.status_code})",
-            )
-        if resp.status_code in (401, 403):
-            raise HTTPException(
-                status_code=401,
-                detail="OpenAI Codex authentication/authorization failed. Re-authenticate or verify token scope.",
-            )
-        raise HTTPException(
-            status_code=400,
-            detail=f"OpenAI Codex request rejected ({resp.status_code}): {err_txt}",
-        )
-
-    data = _parse_codex_json_response(resp, model=model, context="non-stream")
+def _parse_codex_non_stream_payload(data: Dict[str, Any], *, model: str) -> Dict[str, Any]:
+    """Parse successful non-streaming Codex payload into unified response schema."""
     usage = data.get("usage") or {}
     prompt_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     completion_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
@@ -1403,6 +1296,140 @@ async def _call_openai_codex(
     if reasoning_text:
         result["reasoning_content"] = reasoning_text
     return result
+
+
+async def _call_openai_codex(
+    model: str,
+    request: "ChatCompletionRequest",
+    provider: str | None,
+) -> Dict[str, Any]:
+    """Direct OpenAI Codex OAuth transport (no LiteLLM)."""
+    import httpx
+
+    from nadirclaw.credentials import get_credential, get_credential_source
+
+    oauth_token = get_credential("openai-codex")
+    if not oauth_token:
+        raise HTTPException(
+            status_code=500,
+            detail="No OpenAI Codex OAuth/API credential configured.",
+        )
+
+    runtime = get_openai_codex_runtime()
+    await runtime.refresh_if_stale(oauth_token)
+    runtime_model, model_source = runtime.resolve_runtime_model(model)
+    token_source = get_credential_source("openai-codex") or "unknown"
+    use_chat_completions = _request_requires_chat_completions_tool_path(request)
+    path_reason = _codex_chat_path_reason(request)
+
+    provider_messages = _build_openai_style_messages(request)
+    body = _build_codex_responses_body(runtime_model, request, provider_messages)
+    fallback_body = _build_codex_chat_completions_body(runtime_model, request, provider_messages, stream=False)
+
+    if use_chat_completions:
+        logger.info(
+            "OpenAI Codex request forcing chat/completions path reason=%s endpoint=%s requested_model=%s runtime_model=%s token_source=%s model_source=%s",
+            path_reason,
+            runtime.chat_completions_url,
+            model,
+            runtime_model,
+            token_source,
+            model_source,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            if use_chat_completions:
+                attempts: List[tuple[str, Dict[str, Any], str]] = [
+                    (runtime.chat_completions_url, fallback_body, "chat_completions_tool_history"),
+                ]
+            else:
+                logger.info(
+                    "OpenAI Codex call endpoint=%s requested_model=%s runtime_model=%s token_source=%s model_source=%s",
+                    runtime.responses_url,
+                    model,
+                    runtime_model,
+                    token_source,
+                    model_source,
+                )
+                attempts = [
+                    (runtime.responses_url, body, "responses"),
+                    (runtime.chat_completions_url, fallback_body, "chat_completions_fallback"),
+                ]
+
+            resp = None
+            data = None
+            for attempt_idx, (target_url, payload, attempt_label) in enumerate(attempts):
+                resp = await client.post(
+                    target_url,
+                    headers={
+                        "Authorization": f"Bearer {oauth_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if (
+                    resp.status_code in (400, 404, 422)
+                    and attempt_idx == 0
+                    and not use_chat_completions
+                ):
+                    logger.info(
+                        "OpenAI Codex responses fallback -> chat/completions endpoint=%s reason=status_%s",
+                        runtime.chat_completions_url,
+                        resp.status_code,
+                    )
+                    continue
+                if resp.status_code >= 400:
+                    break
+                try:
+                    data = _parse_codex_json_response(resp, model=model, context="non-stream")
+                    return _parse_codex_non_stream_payload(data, model=model)
+                except UpstreamModelError:
+                    if attempt_idx == 0 and not use_chat_completions:
+                        logger.info(
+                            "OpenAI Codex responses fallback -> chat/completions endpoint=%s reason=invalid_payload_%s",
+                            runtime.chat_completions_url,
+                            attempt_label,
+                        )
+                        continue
+                    raise
+            if resp is None:
+                raise UpstreamModelError(
+                    model=model,
+                    provider="openai-codex",
+                    message="OpenAI Codex request produced no response attempts",
+                )
+    except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+        raise UpstreamModelError(
+            model=model,
+            provider="openai-codex",
+            message=f"OpenAI Codex network/timeout error: {exc}",
+        ) from exc
+
+    if resp.status_code >= 400:
+        err_txt = resp.text[:1000]
+        logger.error("OpenAI Codex error (%s): %s", resp.status_code, err_txt)
+        if resp.status_code == 429:
+            raise RateLimitExhausted(model=model, retry_after=60)
+        if _is_retryable_upstream_status(resp.status_code):
+            raise UpstreamModelError(
+                model=model,
+                provider="openai-codex",
+                status_code=resp.status_code,
+                message=f"OpenAI Codex retryable upstream status ({resp.status_code})",
+            )
+        if resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=401,
+                detail="OpenAI Codex authentication/authorization failed. Re-authenticate or verify token scope.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"OpenAI Codex request rejected ({resp.status_code}): {err_txt}",
+        )
+
+    data = _parse_codex_json_response(resp, model=model, context="non-stream")
+    return _parse_codex_non_stream_payload(data, model=model)
 
 
 # ---------------------------------------------------------------------------

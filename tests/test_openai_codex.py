@@ -128,6 +128,15 @@ def test_corrupt_cache_file_is_ignored(tmp_path, monkeypatch):
     assert runtime.get_discovered_display_models() == []
 
 
+def test_non_dict_cache_root_is_ignored(tmp_path, monkeypatch):
+    cache_file = tmp_path / "openai_codex_models.json"
+    cache_file.write_text(json.dumps([{"models": ["gpt-5.4"]}]))
+    monkeypatch.setenv("NADIRCLAW_OPENAI_CODEX_MODEL_CACHE", str(cache_file))
+
+    runtime = OpenAICodexRuntime()
+    assert runtime.get_discovered_display_models() == []
+
+
 def test_invalid_fetched_at_in_cache_is_ignored(tmp_path, monkeypatch):
     cache_file = tmp_path / "openai_codex_models.json"
     cache_file.write_text(json.dumps({"models": ["gpt-5.4"], "fetched_at": "not-an-int"}))
